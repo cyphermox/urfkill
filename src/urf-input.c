@@ -212,8 +212,10 @@ urf_input_startup (UrfInput *input)
 	udev_enumerate_unref(enumerate);
 	udev_unref(udev);
 
-	if (!dev_node)
+	if (!dev_node) {
+		g_warning("No device to use as input for a soft key control");
 		return FALSE;
+	}
 
 	ret = input_dev_open_channel (input, dev_node);
 	g_free (dev_node);
