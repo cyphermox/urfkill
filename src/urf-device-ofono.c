@@ -181,6 +181,7 @@ get_soft (UrfDevice *device)
 	return soft;
 }
 
+#if 0
 static void
 set_online_cb (GObject *source_object,
                GAsyncResult *res,
@@ -201,6 +202,7 @@ set_online_cb (GObject *source_object,
 		           error ? error->message : "(unknown error)");
 	}
 }
+#endif
 
 /**
  * set_soft:
@@ -210,21 +212,33 @@ set_soft (UrfDevice *device, gboolean blocked)
 {
 	UrfDeviceOfono *modem = URF_DEVICE_OFONO (device);
 	UrfDeviceOfonoPrivate *priv = URF_DEVICE_OFONO_GET_PRIVATE (modem);
+	GVariant *ret;
+	GError *error = NULL;
+	gboolean success = FALSE;
 
 	priv->soft = blocked;
-	g_dbus_proxy_call (priv->proxy,
-	                   "SetProperty",
-	                   g_variant_new ("(sv)",
-	                                  "Online",
-                                          g_variant_new_boolean (!blocked)),
-	                   G_DBUS_CALL_FLAGS_NONE,
-	                   -1,
-	                   priv->cancellable,
-	                   (GAsyncReadyCallback) set_online_cb,
-	                   modem);
+	ret = g_dbus_proxy_call_sync (priv->proxy,
+	                              "SetProperty",
+	                              g_variant_new ("(sv)",
+	                                             "Online",
+                                                     g_variant_new_boolean (!blocked)),
+	                              G_DBUS_CALL_FLAGS_NONE,
+	                              -1,
+	                              priv->cancellable,
+	                              &error);
 
-	/* always succeeds since it's an async call */
-	return TRUE;
+	if (!error) {
+		g_debug ("online change successful: %s",
+		         g_variant_print (ret, TRUE));
+		success = TRUE;
+	} else {
+		g_warning ("failed to set %s Online property to %s: %s",
+		           urf_device_get_name (modem),
+		           !blocked ? "true" : "false",
+		           g_variant_print (ret, TRUE));
+	}
+
+	return success;
 }
 
 /**
