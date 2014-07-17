@@ -166,6 +166,16 @@ urf_arbitrator_set_flight_mode (UrfArbitrator  *arbitrator,
 	g_message("set_flight_mode: %d:", (int) block);
 
 	for (i = RFKILL_TYPE_ALL + 1; i < NUM_RFKILL_TYPES; i++) {
+
+		/* Handle modem separately: we shouldn't save states here,
+		 * because there is no UI switch for just modem.
+		 */
+		if (i == RFKILL_TYPE_WWAN) {
+			ret = urf_arbitrator_set_block (arbitrator, i, block);
+			urf_config_set_persist_state(priv->config, i, block);
+			continue;
+		}
+
 		state = urf_killswitch_get_state (priv->killswitch[i]);
 
 		if (state != KILLSWITCH_STATE_NO_ADAPTER) {
