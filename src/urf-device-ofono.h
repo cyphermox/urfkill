@@ -47,6 +47,9 @@ typedef struct {
 
 typedef struct {
         UrfDeviceClass parent;
+
+        void 		(*device_powered)	(UrfDeviceOfono	*device,
+						 gboolean powered);
 } UrfDeviceOfonoClass;
 
 

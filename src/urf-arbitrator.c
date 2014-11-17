@@ -435,9 +435,12 @@ urf_arbitrator_add_device (UrfArbitrator *arbitrator, UrfDevice *device)
 	g_return_val_if_fail (URF_IS_ARBITRATOR (arbitrator), FALSE);
 	g_return_val_if_fail (URF_IS_DEVICE (device), FALSE);
 
+	index = urf_device_get_index (device);
+	if (urf_arbitrator_find_device (arbitrator, index) != NULL)
+		return FALSE;
+
 	priv = arbitrator->priv;
 	type = urf_device_get_device_type (device);
-	index = urf_device_get_index (device);
 	soft = urf_device_is_software_blocked (device);
 
 	priv->devices = g_list_append (priv->devices, device);
@@ -472,10 +475,15 @@ urf_arbitrator_add_device (UrfArbitrator *arbitrator, UrfDevice *device)
 gboolean
 urf_arbitrator_remove_device (UrfArbitrator *arbitrator, UrfDevice *device)
 {
-	gint type;
+	gint type, index;
+	gchar *object_path;
 
 	g_return_val_if_fail (URF_IS_ARBITRATOR (arbitrator), FALSE);
 	g_return_val_if_fail (URF_IS_DEVICE (device), FALSE);
+
+	index = urf_device_get_index (device);
+	if (urf_arbitrator_find_device (arbitrator, index) == NULL)
+		return FALSE;
 
 	type = urf_device_get_device_type (device);
 
@@ -483,10 +491,15 @@ urf_arbitrator_remove_device (UrfArbitrator *arbitrator, UrfDevice *device)
 
 	arbitrator->priv->devices = g_list_remove (arbitrator->priv->devices, device);
 
+	/* killswitch_del_device unrefs the device, so we make a copy of the path */
+	object_path = g_strdup (urf_device_get_object_path (device));
+
 	urf_killswitch_del_device (arbitrator->priv->killswitch[type], device);
 
 	g_signal_emit (G_OBJECT (arbitrator), signals[DEVICE_REMOVED], 0,
-	               urf_device_get_object_path (device));
+	               object_path);
+
+	g_free (object_path);
 
 	return TRUE;
 }
