@@ -53,6 +53,13 @@ enum
 	PROP_LAST
 };
 
+enum {
+	SIGNAL_POWERED,
+	LAST_SIGNAL
+};
+
+static guint signals[LAST_SIGNAL];
+
 #define URF_DEVICE_OFONO_GET_PRIVATE(obj) (G_TYPE_INSTANCE_GET_PRIVATE((obj), \
                                            URF_TYPE_DEVICE_OFONO, UrfDeviceOfonoPrivate))
 
@@ -65,8 +72,8 @@ struct _UrfDeviceOfonoPrivate {
 	gboolean soft;
 
 	GDBusProxy *proxy;
-	GCancellable *cancellable;
 	GTask *pending_block_task;
+	gboolean pending_set_online_cb;
 };
 
 G_DEFINE_TYPE_WITH_PRIVATE (UrfDeviceOfono, urf_device_ofono, URF_TYPE_DEVICE)
@@ -185,12 +192,18 @@ set_online_cb (GObject *source_object,
                GAsyncResult *res,
                gpointer user_data)
 {
-	UrfDeviceOfono *modem = URF_DEVICE_OFONO (user_data);
-	UrfDeviceOfonoPrivate *priv = URF_DEVICE_OFONO_GET_PRIVATE (modem);
+	UrfDeviceOfono *modem;
+	UrfDeviceOfonoPrivate *priv;
 	GVariant *result;
 	GError *error = NULL;
 	gint code = 0;
 
+	g_return_if_fail (URF_IS_DEVICE_OFONO (user_data));
+
+	modem = URF_DEVICE_OFONO (user_data);
+	priv = URF_DEVICE_OFONO_GET_PRIVATE (modem);
+
+	priv->pending_set_online_cb = FALSE;
 	result = g_dbus_proxy_call_finish (priv->proxy, res, &error);
 
 	if (error == NULL) {
@@ -221,6 +234,8 @@ set_online_cb (GObject *source_object,
 			priv->pending_block_task = NULL;
 		}
 	}
+
+	g_object_unref (modem);
 }
 
 /**
@@ -232,6 +247,17 @@ set_soft (UrfDevice *device, gboolean blocked, GTask *task)
 	UrfDeviceOfono *modem = URF_DEVICE_OFONO (device);
 	UrfDeviceOfonoPrivate *priv = URF_DEVICE_OFONO_GET_PRIVATE (modem);
 
+	if (priv->pending_set_online_cb) {
+		g_message ("%s: pending callback, not setting WWAN", __func__);
+		if (task)
+			g_task_return_new_error (task, URF_DAEMON_ERROR,
+						 URF_DAEMON_ERROR_IN_PROGRESS,
+						 "%s: waiting for ofono response %s",
+						 __func__,
+						 urf_device_get_object_path (URF_DEVICE (modem)));
+		return;
+	}
+
 	if (priv->proxy != NULL) {
 		g_message ("%s: Setting WWAN to %s",
 			   __func__,
@@ -239,7 +265,11 @@ set_soft (UrfDevice *device, gboolean blocked, GTask *task)
 
 		priv->soft = blocked;
 		priv->pending_block_task = task;
+		priv->pending_set_online_cb = TRUE;
 
+		/* We increment the ref count of the object to make sure the
+		 * object exists when callback is invoked.
+		 */
 		g_dbus_proxy_call (priv->proxy,
 				   "SetProperty",
 				   g_variant_new ("(sv)",
@@ -247,9 +277,9 @@ set_soft (UrfDevice *device, gboolean blocked, GTask *task)
 						  g_variant_new_boolean (!blocked)),
 				   G_DBUS_CALL_FLAGS_NONE,
 				   -1,
-				   priv->cancellable,
+				   NULL,
 				   (GAsyncReadyCallback) set_online_cb,
-				   modem);
+				   g_object_ref (device));
 	} else {
 		g_warning ("%s: proxy not ready yet", __func__);
 	}
@@ -269,6 +299,35 @@ get_state (UrfDevice *device)
 		state = KILLSWITCH_STATE_SOFT_BLOCKED;
 
 	return state;
+}
+
+static void
+update_powered (UrfDeviceOfono *modem, gboolean powered_new)
+{
+	UrfDeviceOfonoPrivate *priv = URF_DEVICE_OFONO_GET_PRIVATE (modem);
+	GVariant *var_powered;
+	gboolean powered;
+
+	var_powered = g_hash_table_lookup (priv->properties, "Powered");
+	if (var_powered == NULL) {
+		if (powered_new) {
+			g_message ("%s: creating %s", __func__,
+				   priv->modem_path);
+			g_signal_emit (G_OBJECT (modem),
+				       signals[SIGNAL_POWERED], 0, powered_new);
+		}
+		return;
+	}
+
+	powered = g_variant_get_boolean (var_powered);
+
+	if (powered == powered_new)
+		return;
+
+	g_message ("%s: %s powered=%d", __func__, priv->modem_path, powered_new);
+
+	g_signal_emit (G_OBJECT (modem), signals[SIGNAL_POWERED], 0,
+		       powered_new);
 }
 
 static void
@@ -292,6 +351,12 @@ modem_signal_cb (GDBusProxy *proxy,
 		g_variant_get_child (parameters, 0, "s", &prop_name);
 		g_variant_get_child (parameters, 1, "v", &prop_value);
 
+		if (g_strcmp0 ("Powered", prop_name) == 0) {
+			gboolean powered = g_variant_get_boolean (prop_value);
+
+			update_powered (modem, powered);
+		}
+
 		if (prop_value)
 			g_hash_table_replace (priv->properties,
 			                      g_strdup (prop_name),
@@ -299,17 +364,6 @@ modem_signal_cb (GDBusProxy *proxy,
 
 		if (g_strcmp0 ("Online", prop_name) == 0) {
 			g_signal_emit_by_name(G_OBJECT (modem), "state-changed", 0);
-		}
-
-		if (g_strcmp0 ("Powered", prop_name) == 0) {
-			gboolean powered = FALSE;
-
-			powered = g_variant_get_boolean (prop_value);
-
-			if (powered) {
-				g_message("%s: calling set_soft block: %u", __func__, priv->soft);
-				set_soft (URF_DEVICE (modem), priv->soft, NULL);
-			}
 		}
 
 		g_free (prop_name);
@@ -339,9 +393,10 @@ get_properties_cb (GObject *source_object,
 
 		g_variant_iter_init (&iter, properties);
 		while (g_variant_iter_next (&iter, "{sv}", &key, &variant)) {
-			if (g_strcmp0 ("Powered", key) == 0 &&
-			    g_variant_get_boolean (variant) == TRUE) {
-				set_soft (URF_DEVICE (modem), priv->soft, NULL);
+			if (g_strcmp0 ("Powered", key) == 0 ) {
+				gboolean powered = g_variant_get_boolean (variant);
+
+				update_powered (modem, powered);
 			}
 
 			g_hash_table_insert (priv->properties, g_strdup (key),
@@ -358,6 +413,8 @@ get_properties_cb (GObject *source_object,
 		g_warning ("Error getting properties: %s",
 		           error ? error->message : "(unknown error)");
 	}
+
+	g_object_unref (modem);
 }
 
 /**
@@ -429,6 +486,13 @@ dispose (GObject *object)
 		priv->modem_path = NULL;
 	}
 
+	if (priv->name) {
+		g_free (priv->name);
+		priv->name = NULL;
+	}
+
+	g_hash_table_unref (priv->properties);
+
 	G_OBJECT_CLASS(urf_device_ofono_parent_class)->dispose(object);
 }
 
@@ -440,10 +504,10 @@ urf_device_ofono_init (UrfDeviceOfono *device)
 {
 	UrfDeviceOfonoPrivate *priv = URF_DEVICE_OFONO_GET_PRIVATE (device);
 
-	priv->cancellable = g_cancellable_new ();
 	priv->properties = g_hash_table_new_full (g_str_hash, g_str_equal,
 	                                          g_free, (GDestroyNotify) g_variant_unref);
 	priv->soft = FALSE;
+	priv->pending_set_online_cb = FALSE;
 }
 
 /**
@@ -477,6 +541,15 @@ urf_device_ofono_class_init(UrfDeviceOfonoClass *class)
 	g_object_class_install_property (object_class,
 					 PROP_SOFT,
 					 pspec);
+
+	signals[SIGNAL_POWERED] =
+		g_signal_new ("ofono-device-powered",
+			      G_TYPE_FROM_CLASS (class),
+			      G_SIGNAL_RUN_LAST,
+			      G_STRUCT_OFFSET (UrfDeviceOfonoClass, device_powered),
+			      NULL, NULL,
+			      g_cclosure_marshal_VOID__BOOLEAN,
+			      G_TYPE_NONE, 1, G_TYPE_BOOLEAN);
 }
 
 static GVariant *
@@ -545,20 +618,23 @@ urf_device_ofono_new (gint index, const char *object_path)
 						     "org.ofono",
 						     object_path,
 						     "org.ofono.Modem",
-						     priv->cancellable,
+						     NULL,
 						     &error);
 	if (error == NULL) {
-		g_cancellable_reset (priv->cancellable);
 		g_signal_connect (priv->proxy, "g-signal",
 		                  G_CALLBACK (modem_signal_cb), device);
+
+		/* We increment the ref count of the object to make sure the
+		 * object exists when callback is invoked.
+		 */
 		g_dbus_proxy_call (priv->proxy,
 		                   "GetProperties",
 		                   NULL,
 		                   G_DBUS_CALL_FLAGS_NONE,
 		                   -1,
-		                   priv->cancellable,
+		                   NULL,
 		                   (GAsyncReadyCallback) get_properties_cb,
-		                   device);
+		                   g_object_ref (device));
 	} else {
 		g_warning ("Could not get oFono Modem proxy: %s",
 		           error ? error->message : "(unknown error)");
@@ -566,4 +642,3 @@ urf_device_ofono_new (gint index, const char *object_path)
 
 	return URF_DEVICE (device);
 }
-
