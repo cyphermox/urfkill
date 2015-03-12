@@ -808,20 +808,26 @@ urf_config_get_persist_state (UrfConfig *config,
 	UrfConfigPrivate *priv = URF_CONFIG_GET_PRIVATE (config);
 	gboolean state = FALSE;
 	GError *error = NULL;
+	gint end_type;
 
-	g_return_val_if_fail (type >= 0, FALSE);
+	if (type == RFKILL_TYPE_WWAN && urf_config_get_strict_flight_mode (config))
+		end_type = RFKILL_TYPE_ALL;
+	else
+		end_type = type;
 
-	state = g_key_file_get_boolean (priv->persistence_file, type_to_string (type), "soft", &error);
+	g_return_val_if_fail (end_type >= 0, FALSE);
+
+	state = g_key_file_get_boolean (priv->persistence_file, type_to_string (end_type), "soft", &error);
 
 	if (error) {
 			/* Debug only; there can be devices disappearing when some killswitches
 			 * are triggered.
 			 */
-			g_debug ("Could not get state for device %s: %s", type_to_string (type), error->message);
+			g_debug ("Could not get state for device %s: %s", type_to_string (end_type), error->message);
 			g_error_free (error);
 	}
 
-	g_debug ("saved state for device %s: %s", type_to_string (type), state ? "blocked" : "unblocked");
+	g_debug ("saved state for device %s: %s", type_to_string (end_type), state ? "blocked" : "unblocked");
 
 	return state;
 }
@@ -835,6 +841,10 @@ urf_config_get_prev_soft (UrfConfig *config,
 	GError *error = NULL;
 
 	g_return_val_if_fail (type >= 0, FALSE);
+
+	if (type == RFKILL_TYPE_WWAN && urf_config_get_strict_flight_mode (config))
+		return state;
+
 	state = g_key_file_get_boolean (priv->persistence_file, type_to_string (type), "prev-soft", &error);
 
 	if (error) {
@@ -888,6 +898,10 @@ urf_config_set_persist_state (UrfConfig *config,
 
 	g_return_if_fail (type >= 0);
 
+	/* For WWAN/strict FM, state saved when FM is successfully set */
+	if (type == RFKILL_TYPE_WWAN && urf_config_get_strict_flight_mode (config))
+		return;
+
 	g_debug ("setting state for device %s: %s", type_to_string (type), state > 0 ? "blocked" : "unblocked");
 
 	g_key_file_set_boolean (priv->persistence_file, type_to_string (type), "soft", state > 0);
@@ -903,6 +917,9 @@ urf_config_set_prev_soft (UrfConfig *config,
 	UrfConfigPrivate *priv = URF_CONFIG_GET_PRIVATE (config);
 
 	g_return_if_fail (type >= 0);
+	
+	if (type == RFKILL_TYPE_WWAN && urf_config_get_strict_flight_mode (config))
+		return;
 
 	g_debug ("setting state for device %s: %s", type_to_string (type), block ? "blocked" : "unblocked");
 
